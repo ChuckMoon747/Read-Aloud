@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14161a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Read Aloud</title>
+<style>
+:root{--bg:#14161a;--card:#1e2128;--line:#2c313a;--tx:#eef0f3;--mut:#9aa3b0;--acc:#f0a830;--ok:#4cc38a;--bad:#e5645b}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+body{padding:env(safe-area-inset-top) 0 calc(env(safe-area-inset-bottom) + 150px)}
+header{padding:16px 18px 6px;display:flex;align-items:center;gap:10px}
+header h1{font-size:20px;margin:0;flex:1}
+.tabs{display:flex;gap:6px;padding:6px 14px 10px;overflow-x:auto}
+.tab{flex:0 0 auto;background:var(--card);border:1px solid var(--line);color:var(--mut);padding:8px 14px;border-radius:20px;font-size:14px}
+.tab.on{background:var(--acc);color:#111;border-color:var(--acc);font-weight:600}
+section{display:none;padding:0 14px}
+section.on{display:block}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px}
+.big{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;width:100%;min-height:120px;border:2px dashed var(--acc);border-radius:16px;background:transparent;color:var(--tx);font-size:18px;font-weight:600}
+.big small{font-weight:400;color:var(--mut);font-size:13px}
+button,.btn{background:var(--line);color:var(--tx);border:0;border-radius:10px;padding:10px 14px;font-size:15px;cursor:pointer}
+.btn.acc{background:var(--acc);color:#111;font-weight:600}
+input[type=text],select{width:100%;background:#111317;color:var(--tx);border:1px solid var(--line);border-radius:10px;padding:11px;font-size:16px}
+.row{display:flex;gap:8px;align-items:center}
+.row>*{flex:1}
+.mut{color:var(--mut);font-size:13px}
+.status{min-height:20px;font-size:14px;color:var(--mut);margin:8px 2px}
+.status.err{color:var(--bad)}
+.cand{display:flex;gap:12px;align-items:center;padding:10px;border-radius:12px;border:1px solid var(--line);margin-bottom:8px;background:#181b21}
+.cand img{width:48px;height:72px;object-fit:cover;border-radius:4px;background:#333;flex:0 0 auto}
+.cand .t{font-weight:600}
+.pill{display:inline-block;font-size:11px;padding:2px 8px;border-radius:10px;margin-top:4px}
+.pill.ok{background:#1f3d2f;color:var(--ok)}
+.pill.no{background:#3d2423;color:#f29c95}
+#reader{font-family:Georgia,"Iowan Old Style",serif;font-size:19px;line-height:1.7}
+#reader p{margin:0 0 1em}
+#reader span{border-radius:4px;transition:background .15s}
+#reader span.cur{background:rgba(240,168,48,.3);color:#fff}
+#bookTitle{font-size:17px;font-weight:700}
+.player{position:fixed;left:0;right:0;bottom:0;background:#0f1114ee;backdrop-filter:blur(10px);border-top:1px solid var(--line);padding:10px 14px calc(env(safe-area-inset-bottom) + 10px)}
+.player .ctl{display:flex;justify-content:space-between;align-items:center;gap:6px}
+.player .ctl button{font-size:20px;min-width:52px;height:48px;background:transparent}
+.player .ctl .play{background:var(--acc);color:#111;border-radius:50%;min-width:60px;height:60px;font-size:24px}
+.player .meta{display:flex;justify-content:space-between;font-size:12px;color:var(--mut);margin-bottom:6px}
+progress{width:100%;height:4px;appearance:none;border:0;background:var(--line);border-radius:2px}
+progress::-webkit-progress-bar{background:var(--line);border-radius:2px}
+progress::-webkit-progress-value{background:var(--acc);border-radius:2px}
+.chap{display:block;width:100%;text-align:left;margin-bottom:6px;background:#181b21}
+.chap.cur{outline:2px solid var(--acc)}
+label.set{display:block;margin:12px 0 4px;font-size:14px;color:var(--mut)}
+.hidden{display:none!important}
+#preview{max-width:100%;max-height:220px;border-radius:10px;display:block;margin:10px auto 0}
+</style>
+</head>
+<body>
+<header><h1>📖 Read Aloud</h1><span class="mut" id="libStatus"></span></header>
+<nav class="tabs">
+  <button class="tab on" data-tab="scan">Scan</button>
+  <button class="tab" data-tab="read">Read</button>
+  <button class="tab" data-tab="chapters">Chapters</button>
+  <button class="tab" data-tab="settings">Voice</button>
+</nav>
+
+<!-- SCAN -->
+<section id="scan" class="on">
+  <div class="card">
+    <label class="big" for="coverIn">📷 Scan book cover<small>or the barcode on the back (most accurate)</small></label>
+    <input id="coverIn" type="file" accept="image/*" capture="environment" class="hidden">
+    <img id="preview" class="hidden" alt="">
+    <div class="status" id="scanStatus"></div>
+  </div>
+  <div class="card">
+    <div class="row"><input id="q" type="text" placeholder="…or type a title / author"><button class="btn acc" id="qBtn" style="flex:0 0 auto">Search</button></div>
+  </div>
+  <div id="cands"></div>
+  <div class="card">
+    <div class="mut" style="margin-bottom:8px">Have the book another way?</div>
+    <div class="row">
+      <label class="btn" for="fileIn" style="text-align:center">📂 Open EPUB / TXT</label>
+      <label class="btn" for="pageIn" style="text-align:center">📄 Scan a page</label>
+    </div>
+    <input id="fileIn" type="file" accept=".epub,.txt,application/epub+zip,text/plain" class="hidden">
+    <input id="pageIn" type="file" accept="image/*" capture="environment" class="hidden">
+    <div class="mut" style="margin-top:8px">“Scan a page” reads printed pages from a physical book — scan one after another and they queue up.</div>
+  </div>
+</section>
+
+<!-- READ -->
+<section id="read">
+  <div class="card"><div id="bookTitle">No book loaded</div><div class="mut" id="bookSub">Scan a cover to begin.</div></div>
+  <div class="card" id="reader"></div>
+</section>
+
+<!-- CHAPTERS -->
+<section id="chapters"><div id="chapList" class="card"><span class="mut">No book loaded.</span></div></section>
+
+<!-- SETTINGS -->
+<section id="settings">
+  <div class="card">
+    <label class="set">Voice (best-sounding listed first)</label>
+    <select id="voiceSel"></select>
+    <label class="set">Speed: <b id="rateV">1.0×</b></label>
+    <input id="rate" type="range" min="0.6" max="2" step="0.05" value="1" style="width:100%">
+    <label class="set">Sleep timer</label>
+    <select id="sleep"><option value="0">Off</option><option value="15">15 min</option><option value="30">30 min</option><option value="60">60 min</option></select>
+    <div class="row" style="margin-top:14px"><button id="testVoice">▶︎ Test voice</button></div>
+    <p class="mut">Tip: on iPhone, add better voices in Settings → Accessibility → Spoken Content → Voices (pick an “Enhanced” or “Premium” voice). On Android, install “Speech Services by Google” voices. They’ll show up here at the top.</p>
+  </div>
+</section>
+
+<!-- PLAYER -->
+<div class="player">
+  <div class="meta"><span id="pChap">—</span><span id="pPct">0%</span></div>
+  <progress id="prog" max="1" value="0"></progress>
+  <div class="ctl" style="margin-top:6px">
+    <button id="bChap" title="Previous chapter">⏮</button>
+    <button id="bBack" title="Back 1 sentence">↺</button>
+    <button id="bPlay" class="play" title="Play/Pause">▶︎</button>
+    <button id="bFwd" title="Forward 1 sentence">↻</button>
+    <button id="fChap" title="Next chapter">⏭</button>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js" defer></script>
+<script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js" defer></script>
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
+};
+
+/* ---------- Tabs ---------- */
+function showTab(id) {
+  document.querySelectorAll(".tab").forEach(t => t.classList.toggle("on", t.dataset.tab === id));
+  document.querySelectorAll("section").forEach(s => s.classList.toggle("on", s.id === id));
+  window.scrollTo(0, 0);
+  if (id === "read") scrollToCur();
+}
+document.querySelectorAll(".tab").forEach(t => t.onclick = () => showTab(t.dataset.tab));
+function status(msg, err) { const el = $("#scanStatus"); el.textContent = msg || ""; el.classList.toggle("err", !!err); }
+
+/* ---------- Image helpers ---------- */
+function loadImage(file) {
+  return new Promise((res, rej) => { const img = new Image(); img.onload = () => res(img); img.onerror = rej; img.src = URL.createObjectURL(file); });
+}
+// Downscale + grayscale + contrast stretch — big accuracy boost for OCR on phone photos
+function prep(img, maxW = 1800) {
+  const s = Math.min(1, maxW / img.naturalWidth);
+  const c = document.createElement("canvas");
+  c.width = Math.round(img.naturalWidth * s); c.height = Math.round(img.naturalHeight * s);
+  const x = c.getContext("2d"); x.drawImage(img, 0, 0, c.width, c.height);
+  const d = x.getImageData(0, 0, c.width, c.height), p = d.data;
+  let lo = 255, hi = 0; const g = new Uint8ClampedArray(p.length / 4);
+  for (let i = 0; i < g.length; i++) { const v = (p[i*4]*.299 + p[i*4+1]*.587 + p[i*4+2]*.114) | 0; g[i] = v; if (v < lo) lo = v; if (v > hi) hi = v; }
+  const r = hi - lo || 1;
+  for (let i = 0; i < g.length; i++) { const v = ((g[i] - lo) * 255 / r) | 0; p[i*4] = p[i*4+1] = p[i*4+2] = v; }
+  x.putImageData(d, 0, 0); return c;
+}
+let worker = null;
+async function ocr(canvas, onProg) {
+  if (!window.Tesseract) throw new Error("Text reader still loading — try again in a moment.");
+  if (!worker) worker = await Tesseract.createWorker("eng", 1, { logger: m => m.status === "recognizing text" && onProg && onProg(m.progress) });
+  const { data } = await worker.recognize(canvas);
+  return data;
+}
+async function readBarcode(img) {
+  try {
+    if ("BarcodeDetector" in window) {
+      const bd = new BarcodeDetector({ formats: ["ean_13", "upc_a"] });
+      const r = await bd.detect(img); if (r[0]) return r[0].rawValue;
+    }
+  } catch {}
+  try {
+    if (window.ZXing) {
+      const hints = new Map(); hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+      const rd = new ZXing.BrowserMultiFormatReader(hints);
+      const r = await rd.decodeFromImageElement(img); if (r) return r.getText();
+    }
+  } catch {}
+  return null;
+}
+
+/* ---------- Scan cover ---------- */
+$("#coverIn").onchange = async e => {
+  const f = e.target.files[0]; e.target.value = ""; if (!f) return;
+  $("#cands").innerHTML = "";
+  const img = await loadImage(f);
+  $("#preview").src = img.src; $("#preview").classList.remove("hidden");
+  status("Looking for a barcode…");
+  const code = await readBarcode(img);
+  if (code && /^97[89]\d{10}$|^\d{9}[\dX]$/.test(code)) { status("Found ISBN " + code); return search({ isbn: code }); }
+  status("Reading cover text…");
+  try {
+    const data = await ocr(prep(img, 1400), p => status("Reading cover text… " + Math.round(p*100) + "%"));
+    // keep confident words, drop junk
+    const words = (data.words || []).filter(w => w.confidence > 55 && /^[A-Za-z'’\-]{2,}$/.test(w.text)).sort((a,b) => (b.bbox.y1-b.bbox.y0)-(a.bbox.y1-a.bbox.y0));
+    const stop = new Set(["the","and","of","a","an","novel","bestselling","author","new","york","times","edition","by","international","bestseller"]);
+    const q = [...new Set(words.map(w => w.text.replace(/[’']/g,"'")).filter(w => !stop.has(w.toLowerCase())))].slice(0, 7).join(" ");
+    if (!q) return status("Couldn't read the cover. Try the barcode, better light, or type the title.", true);
+    $("#q").value = q; status("Cover says: “" + q + "” — searching…");
+    search({ q });
+  } catch (err) { status(err.message, true); }
+};
+$("#qBtn").onclick = () => $("#q").value.trim() && search({ q: $("#q").value.trim() });
+$("#q").onkeydown = e => e.key === "Enter" && $("#qBtn").click();
+
+async function search({ q, isbn }) {
+  const box = $("#cands"); box.innerHTML = "";
+  try {
+    const fields = "key,title,author_name,first_publish_year,cover_i";
+    const url = isbn ? `https://openlibrary.org/search.json?isbn=${isbn}&fields=${fields}&limit=5`
+                     : `https://openlibrary.org/search.json?q=${encodeURIComponent(q)}&fields=${fields}&limit=6`;
+    const r = await (await fetch(url)).json();
+    if (!r.docs || !r.docs.length) return status("No match. Try the barcode or type the title.", true);
+    status("Tap your book:");
+    for (const d of r.docs) {
+      const el = document.createElement("div"); el.className = "cand";
+      const author = (d.author_name || [])[0] || "Unknown author";
+      el.innerHTML = `<img src="${d.cover_i ? `https://covers.openlibrary.org/b/id/${d.cover_i}-M.jpg` : ""}" alt="">
+        <div style="flex:1"><div class="t"></div><div class="mut"></div><div class="pill-slot"></div></div>`;
+      el.querySelector(".t").textContent = d.title;
+      el.querySelector(".mut").textContent = author + (d.first_publish_year ? " · " + d.first_publish_year : "");
+      el.onclick = () => pickBook(d.title, author, el);
+      box.appendChild(el);
+    }
+  } catch (err) { status("Search failed: " + err.message, true); }
+}
+
+/* ---------- Find full text ---------- */
+async function pickBook(title, author, el) {
+  status(`Finding full text of “${title}”…`);
+  const last = author.split(" ").pop();
+  try {
+    const r = await (await fetch(`https://gutendex.com/books/?search=${encodeURIComponent(title.split(/[:;(]/)[0] + " " + last)}`)).json();
+    const hit = (r.results || []).find(b => b.languages.includes("en")) || (r.results || [])[0];
+    if (!hit) return notFree(title, author, el);
+    const fm = hit.formats;
+    const txtUrl = Object.keys(fm).filter(k => k.startsWith("text/plain")).map(k => fm[k]).find(u => !u.endsWith(".zip"));
+    status("Free public-domain copy found — downloading…");
+    let text;
+    for (const u of [txtUrl, `https://www.gutenberg.org/cache/epub/${hit.id}/pg${hit.id}.txt`].filter(Boolean)) {
+      try { const resp = await fetch(u); if (resp.ok) { text = await resp.text(); break; } } catch {}
+    }
+    if (!text) {
+      status("");
+      el.querySelector(".pill-slot").innerHTML = `<span class="pill ok">Free copy exists</span><div class="mut">Your browser blocked the direct download. <a style="color:var(--acc)" href="https://www.gutenberg.org/ebooks/${hit.id}.epub3.images" target="_blank">Download the EPUB</a>, then use “Open EPUB / TXT”.</div>`;
+      return;
+    }
+    loadBook({ id: "pg" + hit.id, title: hit.title, author: (hit.authors[0] || {}).name || author, chapters: parseGutenberg(text) });
+  } catch (err) { status("Lookup failed: " + err.message, true); }
+}
+function notFree(title, author, el) {
+  status("");
+  const q = encodeURIComponent(title + " " + author);
+  el.querySelector(".pill-slot").innerHTML = `<span class="pill no">Still under copyright</span>
+    <div class="mut" style="margin-top:4px">No free full text. Options: open your own EPUB, scan pages, or get it free from your library:
+    <a style="color:var(--acc)" target="_blank" href="https://libbyapp.com/search/query-${q}">Libby</a> ·
+    <a style="color:var(--acc)" target="_blank" href="https://openlibrary.org/search?q=${q}">Open Library</a></div>`;
+}
+
+/* ---------- Parsers ---------- */
+const ABBR = /(?:\b(?:Mr|Mrs|Ms|Dr|St|Jr|Sr|Mt|Prof|Capt|Col|Gen|Lt|Rev|Hon|vs|etc|No|Vol|Ch|e\.g|i\.e)|\b[A-Z])\.$/;
+function toSentences(par) {
+  const raw = (par.match(/[^.!?…]+(?:[.!?…]+["”’)\]]*|$)\s*/g) || [par]).map(s => s.trim()).filter(Boolean);
+  const out = [];
+  for (const s of raw) { if (out.length && (ABBR.test(out[out.length - 1]) || out[out.length - 1].length < 4)) out[out.length - 1] += " " + s; else out.push(s); }
+  return out;
+}
+function makeChapter(title, paras) {
+  return { title, paras: paras.map(p => p.replace(/\s+/g, " ").trim()).filter(p => p.length > 1).map(toSentences) };
+}
+function parseGutenberg(raw) {
+  let t = raw.replace(/\r/g, "");
+  const s = t.search(/\*\*\*\s*START OF (THE|THIS) PROJECT GUTENBERG[^\n]*\n/i);
+  if (s >= 0) t = t.slice(t.indexOf("\n", s) + 1);
+  const e = t.search(/\*\*\*\s*END OF (THE|THIS) PROJECT GUTENBERG/i);
+  if (e >= 0) t = t.slice(0, e);
+  return splitPlain(t);
+}
+function splitPlain(t) {
+  const paras = t.replace(/\r/g, "").split(/\n\s*\n/).map(p => p.replace(/\n/g, " ").trim()).filter(Boolean);
+  const head = /^(chapter|book|part|stave|letter|section)\s+([0-9]+|[ivxlc]+|one|two|three|four|five|six|seven|eight|nine|ten|[a-z]+-?[a-z]*)\b[.:]?/i;
+  const chs = []; let cur = { title: "Opening", paras: [] };
+  for (const p of paras) {
+    if (p.length < 80 && head.test(p)) { if (cur.paras.length) chs.push(cur); cur = { title: p.replace(/_/g, ""), paras: [] }; }
+    else cur.paras.push(p);
+  }
+  if (cur.paras.length) chs.push(cur);
+  // no headings found → chunk into ~60-paragraph parts
+  let out = chs;
+  if (chs.length < 2) { out = []; for (let i = 0; i < paras.length; i += 60) out.push({ title: "Part " + (out.length + 1), paras: paras.slice(i, i + 60) }); }
+  return out.map(c => makeChapter(c.title, c.paras));
+}
+async function parseEpub(file) {
+  if (!window.JSZip) throw new Error("EPUB reader still loading — try again.");
+  const zip = await JSZip.loadAsync(file);
+  if (zip.file("META-INF/encryption.xml")) throw new Error("This EPUB is DRM-protected (e.g. from Kindle/Apple/Kobo store) and can't be opened.");
+  const dp = new DOMParser();
+  const cont = dp.parseFromString(await zip.file("META-INF/container.xml").async("text"), "application/xml");
+  const opfPath = cont.querySelector("rootfile").getAttribute("full-path");
+  const base = opfPath.includes("/") ? opfPath.slice(0, opfPath.lastIndexOf("/") + 1) : "";
+  const opf = dp.parseFromString(await zip.file(opfPath).async("text"), "application/xml");
+  const title = (opf.getElementsByTagName("dc:title")[0] || {}).textContent || file.name;
+  const author = (opf.getElementsByTagName("dc:creator")[0] || {}).textContent || "";
+  const man = {}; opf.querySelectorAll("manifest item").forEach(i => man[i.getAttribute("id")] = i.getAttribute("href"));
+  const chapters = [];
+  for (const ref of opf.querySelectorAll("spine itemref")) {
+    const href = decodeURIComponent(man[ref.getAttribute("idref")] || ""); const zf = zip.file(base + href); if (!zf) continue;
+    const doc = dp.parseFromString(await zf.async("text"), "application/xhtml+xml");
+    const blocks = [...doc.querySelectorAll("p,h1,h2,h3,li,blockquote,div:not(:has(p,div))")].map(b => b.textContent).filter(s => s && s.trim());
+    if (blocks.join(" ").length < 200) continue;
+    const h = doc.querySelector("h1,h2,h3,title");
+    chapters.push(makeChapter((h && h.textContent.trim()) || "Section " + (chapters.length + 1), blocks));
+  }
+  return { id: "ep:" + title, title, author, chapters };
+}
+$("#fileIn").onchange = async e => {
+  const f = e.target.files[0]; e.target.value = ""; if (!f) return;
+  status("Opening " + f.name + "…");
+  try {
+    if (/\.epub$/i.test(f.name)) loadBook(await parseEpub(f));
+    else { const t = await f.text(); loadBook({ id: "tx:" + f.name, title: f.name.replace(/\.\w+$/, ""), author: "", chapters: /PROJECT GUTENBERG/i.test(t) ? parseGutenberg(t) : splitPlain(t) }); }
+  } catch (err) { status(err.message, true); }
+};
+
+/* ---------- Page scan mode ---------- */
+$("#pageIn").onchange = async e => {
+  const f = e.target.files[0]; e.target.value = ""; if (!f) return;
+  status("Reading page…");
+  try {
+    const data = await ocr(prep(await loadImage(f), 2000), p => status("Reading page… " + Math.round(p*100) + "%"));
+    // rebuild paragraphs from OCR, rejoin hyphenated line breaks
+    const paras = (data.paragraphs || []).map(p => p.text.replace(/-\n/g, "").replace(/\n/g, " ")).filter(p => p.trim().length > 2);
+    if (!paras.length) return status("No text found on that page. Try flatter, brighter, closer.", true);
+    if (!book || !book.id.startsWith("scan")) loadBook({ id: "scan", title: "Scanned pages", author: "", chapters: [] }, true);
+    book.chapters.push(makeChapter("Page " + (book.chapters.length + 1), paras));
+    rebuild(); status(`Page ${book.chapters.length} added (${Math.round(data.confidence)}% confidence).`);
+    if (!playing) { idx = firstIdxOfChapter(book.chapters.length - 1); render(); play(); }
+  } catch (err) { status(err.message, true); }
+};
+
+/* ---------- Book + player ---------- */
+let book = null, flat = [], idx = 0, playing = false, wake = null, sleepAt = 0;
+function rebuild() {
+  flat = [];
+  book.chapters.forEach((c, ci) => c.paras.forEach((p, pi) => p.forEach((s, si) => flat.push({ ci, pi, si, s }))));
+  $("#chapList").innerHTML = "";
+  book.chapters.forEach((c, ci) => { const b = document.createElement("button"); b.className = "chap"; b.textContent = c.title; b.onclick = () => { jump(firstIdxOfChapter(ci)); showTab("read"); }; $("#chapList").appendChild(b); });
+}
+function firstIdxOfChapter(ci) { const i = flat.findIndex(f => f.ci === ci); return i < 0 ? 0 : i; }
+function loadBook(b, silent) {
+  stop(); book = b; rebuild();
+  idx = Math.min(store.get("pos:" + b.id, 0), Math.max(0, flat.length - 1));
+  $("#bookTitle").textContent = b.title; $("#bookSub").textContent = b.author || "";
+  store.set("last", { id: b.id, title: b.title });
+  render();
+  if (!silent) { status(`Loaded — ${b.chapters.length} chapters.` + (idx ? " Resuming where you left off." : "")); showTab("read"); }
+  if ("mediaSession" in navigator) navigator.mediaSession.metadata = new MediaMetadata({ title: b.title, artist: b.author });
+}
+let renderedCh = -1;
+function render() {
+  if (!flat.length) { $("#reader").innerHTML = '<span class="mut">Nothing here yet.</span>'; return; }
+  const cur = flat[idx];
+  if (cur.ci !== renderedCh) {
+    renderedCh = cur.ci; const ch = book.chapters[cur.ci], R = $("#reader"); R.innerHTML = "";
+    const h = document.createElement("p"); h.innerHTML = "<b></b>"; h.firstChild.textContent = ch.title; R.appendChild(h);
+    ch.paras.forEach((p, pi) => { const pe = document.createElement("p"); p.forEach((s, si) => { const sp = document.createElement("span"); sp.id = `s${pi}_${si}`; sp.textContent = s + " "; pe.appendChild(sp); }); R.appendChild(pe); });
+    R.onclick = ev => { const m = ev.target.id && ev.target.id.match(/^s(\d+)_(\d+)$/); if (m) jump(flat.findIndex(f => f.ci === renderedCh && f.pi == m[1] && f.si == m[2])); };
+    document.querySelectorAll(".chap").forEach((b, i) => b.classList.toggle("cur", i === cur.ci));
+  }
+  document.querySelectorAll("#reader span.cur").forEach(s => s.classList.remove("cur"));
+  const el = document.getElementById(`s${cur.pi}_${cur.si}`); if (el) el.classList.add("cur");
+  $("#pChap").textContent = book.chapters[cur.ci].title.slice(0, 40);
+  $("#prog").value = flat.length > 1 ? idx / (flat.length - 1) : 0;
+  $("#pPct").textContent = Math.round($("#prog").value * 100) + "%";
+  store.set("pos:" + book.id, idx);
+  scrollToCur();
+}
+function scrollToCur() { const el = document.querySelector("#reader span.cur"); if (el && $("#read").classList.contains("on")) el.scrollIntoView({ block: "center", behavior: "smooth" }); }
+
+/* Voices: rank natural/neural voices first */
+let voices = [];
+function rankVoice(v) {
+  let s = 0; const n = v.name.toLowerCase();
+  if (/natural|neural|premium|enhanced|siri|wavenet|online/.test(n)) s += 10;
+  if (/google/.test(n)) s += 4;
+  if (/^en[-_](us|gb)/i.test(v.lang)) s += 3; else if (/^en/i.test(v.lang)) s += 2; else s -= 20;
+  if (/compact|espeak|novelty|whisper|bad news|bells|boing|bubbles|cellos|zarvox|trinoids|jester|organ|superstar|wobble|albert|fred|junior|ralph|kathy/.test(n)) s -= 15;
+  return s;
+}
+function loadVoices() {
+  voices = speechSynthesis.getVoices().slice().sort((a, b) => rankVoice(b) - rankVoice(a));
+  const saved = store.get("voice", null), sel = $("#voiceSel"); sel.innerHTML = "";
+  voices.filter(v => rankVoice(v) > -10).forEach(v => { const o = document.createElement("option"); o.value = v.voiceURI; o.textContent = `${v.name} (${v.lang})`; sel.appendChild(o); });
+  if (saved && voices.some(v => v.voiceURI === saved)) sel.value = saved;
+}
+if ("speechSynthesis" in window) { loadVoices(); speechSynthesis.onvoiceschanged = loadVoices; }
+$("#voiceSel").onchange = e => store.set("voice", e.target.value);
+$("#rate").value = store.get("rate", 1); $("#rateV").textContent = (+$("#rate").value).toFixed(2).replace(/0$/, "") + "×";
+$("#rate").oninput = e => { store.set("rate", +e.target.value); $("#rateV").textContent = (+e.target.value).toFixed(2).replace(/0$/, "") + "×"; };
+$("#sleep").onchange = e => { sleepAt = +e.target.value ? Date.now() + e.target.value * 60000 : 0; };
+$("#testVoice").onclick = () => { speechSynthesis.cancel(); speechSynthesis.speak(utter("Hi Chuck. This is how your books will sound.")); };
+
+function utter(text) {
+  const u = new SpeechSynthesisUtterance(text);
+  const v = voices.find(v => v.voiceURI === $("#voiceSel").value); if (v) { u.voice = v; u.lang = v.lang; }
+  u.rate = +$("#rate").value; return u;
+}
+// Speak one sentence at a time: avoids Chrome's ~15s cutoff and gives exact highlighting/resume
+let token = 0;
+function speakCurrent() {
+  if (!playing || !flat[idx]) return;
+  if (sleepAt && Date.now() > sleepAt) { $("#sleep").value = "0"; sleepAt = 0; return stop(); }
+  const my = ++token; const u = utter(flat[idx].s);
+  u.onend = () => { if (my !== token || !playing) return;
+    if (idx < flat.length - 1) { const nextCh = flat[idx + 1].ci !== flat[idx].ci; idx++; render(); nextCh ? setTimeout(speakCurrent, 900) : speakCurrent(); }
+    else stop(); };
+  u.onerror = ev => { if (my === token && ev.error !== "interrupted" && ev.error !== "canceled") { idx++; render(); speakCurrent(); } };
+  speechSynthesis.speak(u);
+}
+async function play() {
+  if (!flat.length) return showTab("scan");
+  playing = true; $("#bPlay").textContent = "❚❚"; speechSynthesis.cancel(); speakCurrent();
+  try { wake = await navigator.wakeLock.request("screen"); } catch {}   // iOS stops speech when the screen locks
+}
+function stop() { playing = false; token++; if ("speechSynthesis" in window) speechSynthesis.cancel(); $("#bPlay").textContent = "▶︎"; try { wake && wake.release(); } catch {} wake = null; }
+function jump(i) { if (!flat.length) return; idx = Math.max(0, Math.min(flat.length - 1, i)); render(); if (playing) { speechSynthesis.cancel(); token++; setTimeout(speakCurrent, 60); } }
+$("#bPlay").onclick = () => playing ? stop() : play();
+$("#bBack").onclick = () => jump(idx - 1);
+$("#bFwd").onclick = () => jump(idx + 1);
+$("#bChap").onclick = () => { const c = flat[idx] ? flat[idx].ci : 0; const st = firstIdxOfChapter(c); jump(idx - st > 3 ? st : firstIdxOfChapter(Math.max(0, c - 1))); };
+$("#fChap").onclick = () => { const c = flat[idx] ? flat[idx].ci : 0; if (c < book.chapters.length - 1) jump(firstIdxOfChapter(c + 1)); };
+if ("mediaSession" in navigator) {
+  navigator.mediaSession.setActionHandler("play", play); navigator.mediaSession.setActionHandler("pause", stop);
+  try { navigator.mediaSession.setActionHandler("previoustrack", () => $("#bChap").click()); navigator.mediaSession.setActionHandler("nexttrack", () => $("#fChap").click()); } catch {}
+}
+document.addEventListener("visibilitychange", async () => { if (playing && document.visibilityState === "visible") { try { wake = await navigator.wakeLock.request("screen"); } catch {} } });
+
+/* Resume last Gutenberg book on open */
+(async () => {
+  const last = store.get("last", null);
+  if (last && last.id.startsWith("pg")) {
+    $("#libStatus").textContent = "Reopening " + last.title.slice(0, 22) + "…";
+    try { const id = last.id.slice(2); const t = await (await fetch(`https://www.gutenberg.org/cache/epub/${id}/pg${id}.txt`)).text();
+      loadBook({ id: last.id, title: last.title, author: "", chapters: parseGutenberg(t) }, true); } catch {}
+    $("#libStatus").textContent = "";
+  }
+})();
+</script>
+</body>
+</html>
