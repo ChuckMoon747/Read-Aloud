@@ -5,6 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#14161a">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Read Aloud">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" href="icon-192.png">
 <title>Read Aloud</title>
 <style>
 :root{--bg:#14161a;--card:#1e2128;--line:#2c313a;--tx:#eef0f3;--mut:#9aa3b0;--acc:#f0a830;--ok:#4cc38a;--bad:#e5645b}
@@ -14,7 +20,7 @@ body{padding:env(safe-area-inset-top) 0 calc(env(safe-area-inset-bottom) + 150px
 header{padding:16px 18px 6px;display:flex;align-items:center;gap:10px}
 header h1{font-size:20px;margin:0;flex:1}
 .tabs{display:flex;gap:6px;padding:6px 14px 10px;overflow-x:auto}
-.tab{flex:0 0 auto;background:var(--card);border:1px solid var(--line);color:var(--mut);padding:8px 14px;border-radius:20px;font-size:14px}
+.tab{flex:0 0 auto;background:var(--card);border:1px solid var(--line);color:var(--mut);padding:8px 11px;border-radius:20px;font-size:14px}
 .tab.on{background:var(--acc);color:#111;border-color:var(--acc);font-weight:600}
 section{display:none;padding:0 14px}
 section.on{display:block}
@@ -53,17 +59,35 @@ progress::-webkit-progress-value{background:var(--acc);border-radius:2px}
 .chap.cur{outline:2px solid var(--acc)}
 label.set{display:block;margin:12px 0 4px;font-size:14px;color:var(--mut)}
 .hidden{display:none!important}
+.tile{width:48px;height:72px;border-radius:4px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;font:700 24px Georgia,serif;color:#fff}
 #preview{max-width:100%;max-height:220px;border-radius:10px;display:block;margin:10px auto 0}
 </style>
 </head>
 <body>
-<header><h1>📖 Read Aloud</h1><span class="mut" id="libStatus"></span></header>
+<header><h1>📖 Read Aloud</h1><span class="mut" id="libStatus">v6</span></header>
 <nav class="tabs">
+  <button class="tab" data-tab="library">Library</button>
   <button class="tab on" data-tab="scan">Scan</button>
   <button class="tab" data-tab="read">Read</button>
   <button class="tab" data-tab="chapters">Chapters</button>
   <button class="tab" data-tab="settings">Voice</button>
 </nav>
+
+<!-- LIBRARY -->
+<section id="library">
+  <div class="card hidden" id="installTip" style="border-color:var(--acc)">
+    <b>📲 Install as an app</b>
+    <div class="mut" style="margin-top:4px">Tap Safari's <b>Share</b> button → <b>Add to Home Screen</b>. It opens full-screen, works offline, and keeps your library.<br>Note: Safari and the installed app keep separate libraries — use the app from now on (Backup → Restore moves books across).</div>
+  </div>
+  <div class="card hidden" id="libEmpty"><span class="mut">No books yet. Scan a cover or open a book file — every book you open is saved here automatically.</span></div>
+  <div id="libList"></div>
+  <div class="card">
+    <div class="row"><button id="libBackup">💾 Backup library</button><label class="btn" for="libRestore" style="text-align:center">♻️ Restore</label></div>
+    <input id="libRestore" type="file" accept=".json,application/json" class="hidden">
+    <div class="row" style="margin-top:8px"><button id="clearAudio">🧹 Clear all downloaded audio</button></div>
+    <div class="mut" id="storeInfo" style="margin-top:8px"></div>
+  </div>
+</section>
 
 <!-- SCAN -->
 <section id="scan" class="on">
@@ -175,6 +199,7 @@ function showTab(id) {
   document.querySelectorAll("section").forEach(s => s.classList.toggle("on", s.id === id));
   window.scrollTo(0, 0);
   if (id === "read") scrollToCur();
+  if (id === "library") renderLibrary();
 }
 document.querySelectorAll(".tab").forEach(t => t.onclick = () => showTab(t.dataset.tab));
 function status(msg, err) { const el = $("#scanStatus"); el.textContent = msg || ""; el.classList.toggle("err", !!err); }
@@ -260,14 +285,14 @@ async function search({ q, isbn }) {
         <div style="flex:1"><div class="t"></div><div class="mut"></div><div class="pill-slot"></div></div>`;
       el.querySelector(".t").textContent = d.title;
       el.querySelector(".mut").textContent = author + (d.first_publish_year ? " · " + d.first_publish_year : "");
-      el.onclick = () => pickBook(d.title, author, el);
+      el.onclick = () => pickBook(d.title, author, el, d.cover_i ? `https://covers.openlibrary.org/b/id/${d.cover_i}-M.jpg` : "");
       box.appendChild(el);
     }
   } catch (err) { status("Search failed: " + err.message, true); }
 }
 
 /* ---------- Find full text ---------- */
-async function pickBook(title, author, el) {
+async function pickBook(title, author, el, cover) {
   status(`Finding full text of “${title}”…`);
   const last = author.split(" ").pop();
   try {
@@ -286,7 +311,7 @@ async function pickBook(title, author, el) {
       el.querySelector(".pill-slot").innerHTML = `<span class="pill ok">Free copy exists</span><div class="mut">Your browser blocked the direct download. <a style="color:var(--acc)" href="https://www.gutenberg.org/ebooks/${hit.id}.epub3.images" target="_blank">Download the EPUB</a>, then use “Open EPUB / TXT”.</div>`;
       return;
     }
-    loadBook({ id: "pg" + hit.id, title: hit.title, author: (hit.authors[0] || {}).name || author, chapters: parseGutenberg(text) });
+    loadBook({ id: "pg" + hit.id, title: hit.title, author: (hit.authors[0] || {}).name || author, cover, chapters: parseGutenberg(text) });
   } catch (err) { status("Lookup failed: " + err.message, true); }
 }
 function notFree(title, author, el) {
@@ -520,7 +545,7 @@ $("#pageIn").onchange = async e => {
     if (!paras.length) return status("No text found on that page. Try flatter, brighter, closer.", true);
     if (!book || !book.id.startsWith("scan")) loadBook({ id: "scan", title: "Scanned pages", author: "", chapters: [] }, true);
     book.chapters.push(makeChapter("Page " + (book.chapters.length + 1), paras));
-    rebuild(); status(`Page ${book.chapters.length} added (${Math.round(data.confidence)}% confidence).`);
+    rebuild(); renderedCh = -1; saveBook(book); status(`Page ${book.chapters.length} added (${Math.round(data.confidence)}% confidence).`);
     if (!playing) { idx = firstIdxOfChapter(book.chapters.length - 1); render(); play(); }
   } catch (err) { status(err.message, true); }
 };
@@ -544,12 +569,13 @@ function rebuild() {
   book.chapters.forEach((c, ci) => { const b = document.createElement("button"); b.className = "chap"; b.textContent = c.title; b.onclick = () => { jump(firstIdxOfChapter(ci)); showTab("read"); }; $("#chapList").appendChild(b); });
 }
 function firstIdxOfChapter(ci) { const i = flat.findIndex(f => f.ci === ci); return i < 0 ? 0 : i; }
-function loadBook(b, silent) {
-  stop(); dl.on = false; playingChunk = -1; book = b; rebuild();
+function loadBook(b, silent, fromDb) {
+  stop(); dl.on = false; playingChunk = -1; renderedCh = -1; book = b; rebuild();
   idx = Math.min(store.get("pos:" + b.id, 0), Math.max(0, flat.length - 1));
   $("#bookTitle").textContent = b.title; $("#bookSub").textContent = b.author || "";
   store.set("last", { id: b.id, title: b.title });
   render();
+  if (fromDb) touchMeta(); else if (b.chapters.length) saveBook(b);
   if (!silent) { status(`Loaded — ${b.chapters.length} chapters.` + (idx ? " Resuming where you left off." : "")); showTab("read"); }
   if ("mediaSession" in navigator) navigator.mediaSession.metadata = new MediaMetadata({ title: b.title, artist: b.author });
 }
@@ -569,7 +595,7 @@ function render() {
   $("#pChap").textContent = book.chapters[cur.ci].title.slice(0, 40);
   $("#prog").value = flat.length > 1 ? idx / (flat.length - 1) : 0;
   $("#pPct").textContent = Math.round($("#prog").value * 100) + "%";
-  store.set("pos:" + book.id, idx);
+  store.set("pos:" + book.id, idx); touchMeta();
   scrollToCur();
 }
 function scrollToCur() { const el = document.querySelector("#reader span.cur"); if (el && $("#read").classList.contains("on")) el.scrollIntoView({ block: "center", behavior: "smooth" }); }
@@ -843,15 +869,105 @@ if ("mediaSession" in navigator) {
 }
 document.addEventListener("visibilitychange", async () => { if (playing && document.visibilityState === "visible") { try { wake = await navigator.wakeLock.request("screen"); } catch {} } });
 
-/* Resume last Gutenberg book on open */
-(async () => {
-  const last = store.get("last", null);
-  if (last && last.id.startsWith("pg")) {
-    $("#libStatus").textContent = "Reopening " + last.title.slice(0, 22) + "…";
-    try { const id = last.id.slice(2); const t = await (await fetch(`https://www.gutenberg.org/cache/epub/${id}/pg${id}.txt`)).text();
-      loadBook({ id: last.id, title: last.title, author: "", chapters: parseGutenberg(t) }, true); } catch {}
-    $("#libStatus").textContent = "";
+/* ===== Library: every book you open is saved on this phone (IndexedDB) ===== */
+const DB = (() => {
+  let p;
+  const open = () => p || (p = new Promise((res, rej) => {
+    const r = indexedDB.open("readaloud", 1);
+    r.onupgradeneeded = () => { r.result.createObjectStore("meta", { keyPath: "id" }); r.result.createObjectStore("books", { keyPath: "id" }); };
+    r.onsuccess = () => res(r.result); r.onerror = () => { p = null; rej(r.error); };
+  }));
+  const run = async (store, mode, fn) => { const db = await open(); return new Promise((res, rej) => {
+    const t = db.transaction(store, mode), req = fn(t.objectStore(store)); t.oncomplete = () => res(req && req.result); t.onerror = () => rej(t.error); }); };
+  return {
+    put: (s, v) => run(s, "readwrite", o => o.put(v)), get: (s, id) => run(s, "readonly", o => o.get(id)),
+    del: (s, id) => run(s, "readwrite", o => o.delete(id)), all: s => run(s, "readonly", o => o.getAll())
+  };
+})();
+async function saveBook(b, extra = {}) {
+  try {
+    const old = await DB.get("meta", b.id) || {};
+    await DB.put("books", { id: b.id, title: b.title, author: b.author, chapters: b.chapters });
+    await DB.put("meta", { ...old, id: b.id, title: b.title, author: b.author || "", cover: extra.cover || old.cover || b.cover || "",
+      added: old.added || Date.now(), opened: Date.now(), total: flat.length, chapters: b.chapters.length });
+    try { await navigator.storage.persist(); } catch {}
+  } catch (e) { console.warn("library save failed", e); }
+}
+let metaTimer = 0;
+function touchMeta() {   // keep progress in the library list current (throttled)
+  clearTimeout(metaTimer); const id = book && book.id;
+  metaTimer = setTimeout(async () => { try { const m = await DB.get("meta", id); if (m) { m.opened = Date.now(); m.total = flat.length; await DB.put("meta", m); } } catch {} }, 1500);
+}
+async function openFromLibrary(id, silent) {
+  const b = await DB.get("books", id); if (!b) return false;
+  const m = await DB.get("meta", id) || {}; b.cover = m.cover;
+  loadBook(b, silent, true); return true;
+}
+const esc = s => String(s || "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+async function renderLibrary() {
+  const box = $("#libList"); let metas = [];
+  try { metas = (await DB.all("meta")).sort((a, b) => b.opened - a.opened); } catch {}
+  $("#libEmpty").classList.toggle("hidden", metas.length > 0);
+  box.innerHTML = "";
+  for (const m of metas) {
+    const pos = store.get("pos:" + m.id, 0), pct = m.total > 1 ? Math.round(pos / (m.total - 1) * 100) : 0;
+    const el = document.createElement("div"); el.className = "cand";
+    const hue = [...m.title].reduce((h, c) => h + c.charCodeAt(0), 0) % 360;
+    el.innerHTML = (m.cover ? `<img src="${esc(m.cover)}" alt="">` : `<div class="tile" style="background:hsl(${hue} 45% 32%)">${esc(m.title.trim()[0] || "?")}</div>`)
+      + `<div style="flex:1;min-width:0"><div class="t">${esc(m.title)}</div><div class="mut">${esc(m.author)}${m.author ? " · " : ""}${pct}% read</div>
+         <progress max="100" value="${pct}" style="height:4px;margin-top:6px"></progress></div><button class="del" title="Remove" style="flex:0 0 auto">🗑</button>`;
+    if (book && book.id === m.id) el.style.outline = "2px solid var(--acc)";
+    el.onclick = async ev => {
+      if (ev.target.classList.contains("del")) {
+        ev.stopPropagation(); if (!confirm(`Remove “${m.title}” from your library?`)) return;
+        await DB.del("books", m.id); await DB.del("meta", m.id); return renderLibrary();
+      }
+      await openFromLibrary(m.id);
+    };
+    box.appendChild(el);
   }
+  try { const e = await navigator.storage.estimate(); $("#storeInfo").textContent = `Using ${(e.usage / 1048576).toFixed(0)} MB on this phone` + (await navigator.storage.persisted() ? " · protected from auto-cleanup ✓" : ""); } catch {}
+}
+/* Backup / restore (also how you move books between Safari and the installed app) */
+$("#libBackup").onclick = async () => {
+  const metas = await DB.all("meta"), books = await DB.all("books");
+  const pos = {}; metas.forEach(m => pos[m.id] = store.get("pos:" + m.id, 0));
+  const blob = new Blob([JSON.stringify({ app: "read-aloud-library", v: 1, metas, books, pos })], { type: "application/json" });
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `read-aloud-library-${new Date().toISOString().slice(0, 10)}.json`; a.click();
+};
+$("#libRestore").onchange = async e => {
+  const f = e.target.files[0]; e.target.value = ""; if (!f) return;
+  try {
+    const d = JSON.parse(await f.text()); if (d.app !== "read-aloud-library") throw new Error("That isn't a Read Aloud library backup.");
+    for (const b of d.books) await DB.put("books", b);
+    for (const m of d.metas) await DB.put("meta", m);
+    for (const [id, p] of Object.entries(d.pos || {})) if (!store.get("pos:" + id, 0)) store.set("pos:" + id, p);
+    alert(`Restored ${d.metas.length} book(s).`); renderLibrary();
+  } catch (err) { alert(err.message); }
+};
+$("#clearAudio").onclick = async () => {
+  if (!confirm("Delete ALL downloaded Bella audio for every book? (Books stay in your library.)")) return;
+  try { await caches.delete(CACHE); cacheP = null; memCache.clear(); await updateCost(); renderLibrary(); } catch {}
+};
+
+/* ===== Installable app (home screen, offline, auto-updates) ===== */
+const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone;
+if (!standalone && /iphone|ipad|ipod/i.test(navigator.userAgent)) $("#installTip").classList.remove("hidden");
+if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost")) navigator.serviceWorker.register("sw.js").catch(() => {});
+
+/* ===== Start: reopen the last book ===== */
+(async () => {
+  try { await navigator.storage.persist(); } catch {}
+  await renderLibrary();
+  const last = store.get("last", null);
+  let ok = false;
+  if (last) { try { ok = await openFromLibrary(last.id, true); } catch {} }
+  if (!ok && last && last.id.startsWith("pg")) {   // older version only remembered free classics
+    try { const id = last.id.slice(2); const t = await (await fetch(`https://www.gutenberg.org/cache/epub/${id}/pg${id}.txt`)).text();
+      loadBook({ id: last.id, title: last.title, author: "", chapters: parseGutenberg(t) }, true); ok = true; } catch {}
+  }
+  const metas = await DB.all("meta").catch(() => []);
+  if (metas.length) showTab("library");
 })();
 </script>
 </body>
