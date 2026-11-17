@@ -23,7 +23,7 @@ section.on{display:block}
 .big small{font-weight:400;color:var(--mut);font-size:13px}
 button,.btn{background:var(--line);color:var(--tx);border:0;border-radius:10px;padding:10px 14px;font-size:15px;cursor:pointer}
 .btn.acc{background:var(--acc);color:#111;font-weight:600}
-input[type=text],select{width:100%;background:#111317;color:var(--tx);border:1px solid var(--line);border-radius:10px;padding:11px;font-size:16px}
+input[type=text],input[type=password],select{width:100%;background:#111317;color:var(--tx);border:1px solid var(--line);border-radius:10px;padding:11px;font-size:16px}
 .row{display:flex;gap:8px;align-items:center}
 .row>*{flex:1}
 .mut{color:var(--mut);font-size:13px}
@@ -45,6 +45,7 @@ input[type=text],select{width:100%;background:#111317;color:var(--tx);border:1px
 .player .ctl button{font-size:20px;min-width:52px;height:48px;background:transparent}
 .player .ctl .play{background:var(--acc);color:#111;border-radius:50%;min-width:60px;height:60px;font-size:24px}
 .player .meta{display:flex;justify-content:space-between;font-size:12px;color:var(--mut);margin-bottom:6px}
+input[type=range]{accent-color:var(--acc)}
 progress{width:100%;height:4px;appearance:none;border:0;background:var(--line);border-radius:2px}
 progress::-webkit-progress-bar{background:var(--line);border-radius:2px}
 progress::-webkit-progress-value{background:var(--acc);border-radius:2px}
@@ -100,12 +101,33 @@ label.set{display:block;margin:12px 0 4px;font-size:14px;color:var(--mut)}
 <!-- SETTINGS -->
 <section id="settings">
   <div class="card">
-    <label class="set">Voice (best-sounding listed first)</label>
-    <select id="voiceSel"></select>
+    <label class="set">Voice engine</label>
+    <select id="engine"><option value="kokoro">Free AI voice — natural (recommended)</option><option value="device">Phone's built-in voice (free)</option></select>
+  </div>
+  <div class="card" id="kkBox">
+    <div class="mut" id="kkStatus">Free AI voice that runs on your phone. First use downloads the voice model once (~90 MB, use Wi-Fi).</div>
+    <label class="set">Voice</label>
+    <select id="kkVoice">
+      <option value="af_bella">★ Ameri-style — poised, confident, clear (Bella)</option>
+      <option value="af_heart">Warm &amp; soft — Ameri’s flustered side (Heart)</option>
+      <option value="bf_emma">Regal &amp; elegant, British (Emma)</option>
+      <option value="af_sky">Lighter &amp; younger (Sky)</option>
+      <option value="af_nicole">Soft, close, whispery (Nicole)</option>
+      <option value="af_aoede">Smooth, calm (Aoede)</option>
+      <option value="af_kore">Bright, even (Kore)</option>
+      <option value="bf_isabella">Refined, British (Isabella)</option>
+    </select>
+    <div class="row" style="margin-top:12px"><button id="kkTest" class="btn acc">▶︎ Test voice</button></div>
+  </div>
+  <div class="card">
     <label class="set">Speed: <b id="rateV">1.0×</b></label>
     <input id="rate" type="range" min="0.6" max="2" step="0.05" value="1" style="width:100%">
     <label class="set">Sleep timer</label>
     <select id="sleep"><option value="0">Off</option><option value="15">15 min</option><option value="30">30 min</option><option value="60">60 min</option></select>
+  </div>
+  <div class="card" id="devBox">
+    <label class="set">Voice (best-sounding listed first)</label>
+    <select id="voiceSel"></select>
     <div class="row" style="margin-top:14px"><button id="testVoice">▶︎ Test voice</button></div>
     <p class="mut">Tip: on iPhone, add better voices in Settings → Accessibility → Spoken Content → Voices (pick an “Enhanced” or “Premium” voice). On Android, install “Speech Services by Google” voices. They’ll show up here at the top.</p>
   </div>
@@ -346,10 +368,20 @@ $("#pageIn").onchange = async e => {
 };
 
 /* ---------- Book + player ---------- */
+let chunks = [];
 let book = null, flat = [], idx = 0, playing = false, wake = null, sleepAt = 0;
 function rebuild() {
   flat = [];
   book.chapters.forEach((c, ci) => c.paras.forEach((p, pi) => p.forEach((s, si) => flat.push({ ci, pi, si, s }))));
+  // Fixed audio chunks (same text every time → cached audio is reused, never paid for twice)
+  chunks = []; let cur = null;
+  flat.forEach((f, i) => {
+    const sameP = cur && flat[cur.start].ci === f.ci && flat[cur.start].pi === f.pi;
+    if (!sameP || cur.text.length + f.s.length > 280) { cur = { start: i, end: i, text: "", offs: [] }; chunks.push(cur); }
+    if (cur.text) cur.text += " ";
+    cur.offs.push(cur.text.length); cur.text += f.s; cur.end = i + 1; f.k = chunks.length - 1;
+  });
+  updateCost();
   $("#chapList").innerHTML = "";
   book.chapters.forEach((c, ci) => { const b = document.createElement("button"); b.className = "chap"; b.textContent = c.title; b.onclick = () => { jump(firstIdxOfChapter(ci)); showTab("read"); }; $("#chapList").appendChild(b); });
 }
@@ -403,7 +435,7 @@ function loadVoices() {
 if ("speechSynthesis" in window) { loadVoices(); speechSynthesis.onvoiceschanged = loadVoices; }
 $("#voiceSel").onchange = e => store.set("voice", e.target.value);
 $("#rate").value = store.get("rate", 1); $("#rateV").textContent = (+$("#rate").value).toFixed(2).replace(/0$/, "") + "×";
-$("#rate").oninput = e => { store.set("rate", +e.target.value); $("#rateV").textContent = (+e.target.value).toFixed(2).replace(/0$/, "") + "×"; };
+$("#rate").oninput = e => { store.set("rate", +e.target.value); audio.playbackRate = +e.target.value; $("#rateV").textContent = (+e.target.value).toFixed(2).replace(/0$/, "") + "×"; };
 $("#sleep").onchange = e => { sleepAt = +e.target.value ? Date.now() + e.target.value * 60000 : 0; };
 $("#testVoice").onclick = () => { speechSynthesis.cancel(); speechSynthesis.speak(utter("Hi Chuck. This is how your books will sound.")); };
 
@@ -412,11 +444,18 @@ function utter(text) {
   const v = voices.find(v => v.voiceURI === $("#voiceSel").value); if (v) { u.voice = v; u.lang = v.lang; }
   u.rate = +$("#rate").value; return u;
 }
-// Speak one sentence at a time: avoids Chrome's ~15s cutoff and gives exact highlighting/resume
-let token = 0;
+/* ===== Playback: Kokoro (free AI voice, on-device) or phone voice ===== */
+let token = 0, playingChunk = -1, chunkDur = 0;
+const audio = new Audio(); audio.preload = "auto";
+const engine = () => $("#engine").value;
+
 function speakCurrent() {
   if (!playing || !flat[idx]) return;
   if (sleepAt && Date.now() > sleepAt) { $("#sleep").value = "0"; sleepAt = 0; return stop(); }
+  engine() === "kokoro" ? kkSpeak() : devSpeak();
+}
+// Phone voice: one sentence at a time (avoids Chrome's ~15s cutoff)
+function devSpeak() {
   const my = ++token; const u = utter(flat[idx].s);
   u.onend = () => { if (my !== token || !playing) return;
     if (idx < flat.length - 1) { const nextCh = flat[idx + 1].ci !== flat[idx].ci; idx++; render(); nextCh ? setTimeout(speakCurrent, 900) : speakCurrent(); }
@@ -424,13 +463,108 @@ function speakCurrent() {
   u.onerror = ev => { if (my === token && ev.error !== "interrupted" && ev.error !== "canceled") { idx++; render(); speakCurrent(); } };
   speechSynthesis.speak(u);
 }
+
+// --- Kokoro (open-source, Apache-2.0; runs fully in the browser, no account, no cost) ---
+let kk = null, kkLoading = null;
+function kkLoad() {
+  if (kk) return Promise.resolve(kk);
+  if (kkLoading) return kkLoading;
+  kkLoading = (async () => {
+    $("#kkStatus").textContent = "Downloading voice model (one time, ~90 MB)…";
+    let mod;
+    for (const u of ["https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm", "https://esm.sh/kokoro-js@1.2.1"]) { try { mod = await import(u); break; } catch (e) { console.warn(u, e); } }
+    if (!mod) throw new Error("Couldn't load the voice engine. Check your connection.");
+    kk = await mod.KokoroTTS.from_pretrained("onnx-community/Kokoro-82M-v1.0-ONNX", { dtype: "q8", device: "wasm",
+      progress_callback: p => { if (p.status === "progress" && p.file && /onnx/.test(p.file)) $("#kkStatus").textContent = `Downloading voice model… ${Math.round(p.progress)}%`; } });
+    $("#kkStatus").textContent = "Voice ready ✓ (saved on this phone — works offline next time)";
+    return kk;
+  })();
+  kkLoading.catch(e => { kkLoading = null; $("#kkStatus").textContent = e.message; });
+  return kkLoading;
+}
+const memCache = new Map();
+let genQueue = Promise.resolve();   // one generation at a time keeps the phone responsive
+function getChunk(k) {
+  const c = chunks[k]; if (!c) return Promise.resolve(null);
+  const key = $("#kkVoice").value + "|" + c.text;
+  if (memCache.has(key)) return memCache.get(key);
+  const p = genQueue.then(async () => {
+    const tts = await kkLoad();
+    const out = await tts.generate(c.text, { voice: $("#kkVoice").value, speed: 1 });
+    const blob = out.toBlob ? out.toBlob() : new Blob([out.toWav()], { type: "audio/wav" });
+    return { url: URL.createObjectURL(blob), dur: out.audio.length / out.sampling_rate };
+  });
+  genQueue = p.catch(() => {});
+  memCache.set(key, p); p.catch(() => memCache.delete(key));
+  if (memCache.size > 30) { const old = memCache.keys().next().value; memCache.get(old).then(r => r && URL.revokeObjectURL(r.url)).catch(() => {}); memCache.delete(old); }
+  return p;
+}
+// No word timings from Kokoro → estimate sentence position by its share of the characters
+const sentFrac = (c, j) => c.offs[j] / Math.max(1, c.text.length);
+async function kkSpeak() {
+  const k = flat[idx].k, c = chunks[k], my = ++token;
+  $("#pChap").textContent = kk ? "Preparing voice…" : "Loading voice model…";
+  let res; try { res = await getChunk(k); } catch (err) { if (my === token) { stop(); alertMsg(err.message); } return; }
+  if (my !== token || !playing) return;
+  playingChunk = k; chunkDur = res.dur;
+  audio.src = res.url; audio.playbackRate = +$("#rate").value;
+  const startT = sentFrac(c, idx - c.start) * chunkDur;
+  audio.onloadedmetadata = () => { if (startT > 0.05) audio.currentTime = startT; };
+  try { await audio.play(); } catch { stop(); return alertMsg("Tap ▶︎ to start audio."); }
+  render();
+  getChunk(k + 1).catch(() => {}); getChunk(k + 2).catch(() => {});   // prepare ahead → no gaps
+}
+audio.ontimeupdate = () => {
+  if (!playing || playingChunk < 0 || !chunkDur) return;
+  const c = chunks[playingChunk], f = audio.currentTime / chunkDur;
+  let j = 0; for (let s = 0; s < c.offs.length; s++) if (sentFrac(c, s) <= f + 0.01) j = s;
+  if (c.start + j !== idx) { idx = c.start + j; render(); }
+};
+audio.onended = () => {
+  if (!playing || playingChunk < 0) return; const c = chunks[playingChunk];
+  if (c && c.end < flat.length) { const nextCh = flat[c.end].ci !== flat[c.end - 1].ci; idx = c.end; render(); nextCh ? setTimeout(speakCurrent, 900) : speakCurrent(); }
+  else stop();
+};
+function alertMsg(m) { $("#pChap").textContent = m; status(m, true); }
+
 async function play() {
   if (!flat.length) return showTab("scan");
-  playing = true; $("#bPlay").textContent = "❚❚"; speechSynthesis.cancel(); speakCurrent();
-  try { wake = await navigator.wakeLock.request("screen"); } catch {}   // iOS stops speech when the screen locks
+  playing = true; $("#bPlay").textContent = "❚❚";
+  if (engine() === "kokoro" && playingChunk === (flat[idx] || {}).k && audio.src && !audio.ended && audio.currentTime > 0) {
+    audio.playbackRate = +$("#rate").value; try { await audio.play(); } catch {}
+  } else { if ("speechSynthesis" in window) speechSynthesis.cancel(); speakCurrent(); }
+  try { wake = await navigator.wakeLock.request("screen"); } catch {}
 }
-function stop() { playing = false; token++; if ("speechSynthesis" in window) speechSynthesis.cancel(); $("#bPlay").textContent = "▶︎"; try { wake && wake.release(); } catch {} wake = null; }
-function jump(i) { if (!flat.length) return; idx = Math.max(0, Math.min(flat.length - 1, i)); render(); if (playing) { speechSynthesis.cancel(); token++; setTimeout(speakCurrent, 60); } }
+function stop() {
+  playing = false; token++; audio.pause();
+  if ("speechSynthesis" in window) speechSynthesis.cancel();
+  $("#bPlay").textContent = "▶︎"; try { wake && wake.release(); } catch {} wake = null;
+  if (flat[idx]) $("#pChap").textContent = book.chapters[flat[idx].ci].title.slice(0, 40);
+}
+function jump(i) {
+  if (!flat.length) return; idx = Math.max(0, Math.min(flat.length - 1, i)); render();
+  if (!playing) { playingChunk = -1; return; }
+  if (engine() === "kokoro" && playingChunk === flat[idx].k && chunkDur) { const c = chunks[playingChunk]; audio.currentTime = sentFrac(c, idx - c.start) * chunkDur; return; }
+  token++; audio.pause(); if ("speechSynthesis" in window) speechSynthesis.cancel(); setTimeout(speakCurrent, 60);
+}
+function updateCost() {}
+
+/* ===== Voice settings ===== */
+$("#engine").value = store.get("engine", "kokoro");
+$("#kkVoice").value = store.get("kkVoice", "af_bella");
+function toggleEngine() { const e = engine(); $("#kkBox").classList.toggle("hidden", e !== "kokoro"); $("#devBox").classList.toggle("hidden", e === "kokoro"); }
+$("#engine").onchange = e => { stop(); playingChunk = -1; store.set("engine", e.target.value); toggleEngine(); };
+$("#kkVoice").onchange = e => { stop(); playingChunk = -1; store.set("kkVoice", e.target.value); };
+$("#kkTest").onclick = async () => {
+  stop(); playingChunk = -1; const b = $("#kkTest"); b.textContent = "⏳ Generating…";
+  try {
+    const tts = await kkLoad();
+    const out = await tts.generate("Welcome. I'm the student council president, and I expect you to pay attention. Now then, shall we begin the story?", { voice: $("#kkVoice").value });
+    audio.src = URL.createObjectURL(out.toBlob ? out.toBlob() : new Blob([out.toWav()], { type: "audio/wav" })); audio.playbackRate = 1; await audio.play();
+  } catch (err) { alertMsg(err.message); }
+  b.textContent = "▶︎ Test voice";
+};
+toggleEngine();
 $("#bPlay").onclick = () => playing ? stop() : play();
 $("#bBack").onclick = () => jump(idx - 1);
 $("#bFwd").onclick = () => jump(idx + 1);
