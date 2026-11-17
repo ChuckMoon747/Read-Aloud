@@ -92,6 +92,18 @@ label.set{display:block;margin:12px 0 4px;font-size:14px;color:var(--mut)}
 <!-- READ -->
 <section id="read">
   <div class="card"><div id="bookTitle">No book loaded</div><div class="mut" id="bookSub">Scan a cover to begin.</div></div>
+  <div class="card hidden" id="dlBox">
+    <div style="font-weight:600;margin-bottom:6px">🎧 Listen smoothly</div>
+    <div class="mut" style="margin-bottom:8px">Download Bella's reading of this book ahead of time. Downloaded parts play instantly — even offline. Best on Wi-Fi, plugged in, with the app open.</div>
+    <progress id="dlProg" max="1" value="0" style="height:8px"></progress>
+    <div class="mut" id="dlStat" style="margin:6px 0 10px"></div>
+    <div class="row"><button class="btn acc" id="dlBtn">⬇ Download book audio</button><button id="dlDel" style="flex:0 0 auto">🗑</button></div>
+    <details style="margin-top:12px"><summary class="mut">Faster: make it on my PC</summary>
+      <div class="mut" style="margin:8px 0">1) Send the book list to your PC. 2) Run the Read Aloud script there. 3) Import the MP3 folder back here.</div>
+      <div class="row"><button id="pcExport">📤 Send book list</button><label class="btn" for="pcImport" style="text-align:center">📥 Import MP3s</label></div>
+      <input id="pcImport" type="file" accept=".mp3,audio/mpeg" multiple class="hidden">
+    </details>
+  </div>
   <div class="card" id="reader"></div>
 </section>
 
@@ -387,7 +399,7 @@ function rebuild() {
 }
 function firstIdxOfChapter(ci) { const i = flat.findIndex(f => f.ci === ci); return i < 0 ? 0 : i; }
 function loadBook(b, silent) {
-  stop(); book = b; rebuild();
+  stop(); dl.on = false; playingChunk = -1; book = b; rebuild();
   idx = Math.min(store.get("pos:" + b.id, 0), Math.max(0, flat.length - 1));
   $("#bookTitle").textContent = b.title; $("#bookSub").textContent = b.author || "";
   store.set("last", { id: b.id, title: b.title });
@@ -448,6 +460,7 @@ function utter(text) {
 let token = 0, playingChunk = -1, chunkDur = 0;
 const audio = new Audio(); audio.preload = "auto";
 const engine = () => $("#engine").value;
+const voiceId = () => $("#kkVoice").value;
 
 function speakCurrent() {
   if (!playing || !flat[idx]) return;
@@ -464,52 +477,106 @@ function devSpeak() {
   speechSynthesis.speak(u);
 }
 
-// --- Kokoro (open-source, Apache-2.0; runs fully in the browser, no account, no cost) ---
-let kk = null, kkLoading = null;
-function kkLoad() {
-  if (kk) return Promise.resolve(kk);
-  if (kkLoading) return kkLoading;
-  kkLoading = (async () => {
-    $("#kkStatus").textContent = "Downloading voice model (one time, ~90 MB)…";
+/* --- Kokoro runs in a background worker: UI stays smooth, audio is compressed to MP3 (~6 KB/sec) --- */
+const WORKER_SRC = `
+let tts = null, loading = null;
+try { importScripts("https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"); } catch (e) {}
+function load() {
+  if (tts) return Promise.resolve(tts);
+  if (loading) return loading;
+  loading = (async () => {
     let mod;
-    for (const u of ["https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm", "https://esm.sh/kokoro-js@1.2.1"]) { try { mod = await import(u); break; } catch (e) { console.warn(u, e); } }
+    for (const u of ["https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm", "https://esm.sh/kokoro-js@1.2.1"]) { try { mod = await import(u); break; } catch (e) {} }
     if (!mod) throw new Error("Couldn't load the voice engine. Check your connection.");
-    kk = await mod.KokoroTTS.from_pretrained("onnx-community/Kokoro-82M-v1.0-ONNX", { dtype: "q8", device: "wasm",
-      progress_callback: p => { if (p.status === "progress" && p.file && /onnx/.test(p.file)) $("#kkStatus").textContent = `Downloading voice model… ${Math.round(p.progress)}%`; } });
-    $("#kkStatus").textContent = "Voice ready ✓ (saved on this phone — works offline next time)";
-    return kk;
+    tts = await mod.KokoroTTS.from_pretrained("onnx-community/Kokoro-82M-v1.0-ONNX", { dtype: "q8", device: "wasm",
+      progress_callback: p => { if (p.status === "progress" && p.file && /onnx/.test(p.file)) postMessage({ type: "progress", pct: p.progress }); } });
+    postMessage({ type: "ready" });
+    return tts;
   })();
-  kkLoading.catch(e => { kkLoading = null; $("#kkStatus").textContent = e.message; });
-  return kkLoading;
+  loading.catch(() => { loading = null; });
+  return loading;
 }
-const memCache = new Map();
-let genQueue = Promise.resolve();   // one generation at a time keeps the phone responsive
-function getChunk(k) {
+function encode(f32, sr) {
+  const i16 = new Int16Array(f32.length);
+  for (let i = 0; i < f32.length; i++) { const s = Math.max(-1, Math.min(1, f32[i])); i16[i] = s < 0 ? s * 32768 : s * 32767; }
+  if (self.lamejs) {
+    const enc = new lamejs.Mp3Encoder(1, sr, 48), parts = [];
+    for (let i = 0; i < i16.length; i += 1152) { const b = enc.encodeBuffer(i16.subarray(i, i + 1152)); if (b.length) parts.push(b); }
+    const e = enc.flush(); if (e.length) parts.push(e);
+    return new Blob(parts, { type: "audio/mpeg" });
+  }
+  const b = new ArrayBuffer(44 + i16.length * 2), v = new DataView(b), w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, "RIFF"); v.setUint32(4, 36 + i16.length * 2, true); w(8, "WAVEfmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, "data"); v.setUint32(40, i16.length * 2, true);
+  new Int16Array(b, 44).set(i16); return new Blob([b], { type: "audio/wav" });
+}
+onmessage = async e => {
+  const { id, text, voice } = e.data;
+  try {
+    const t = await load();
+    if (!text) return postMessage({ id });
+    const out = await t.generate(text, { voice, speed: 1 });
+    postMessage({ id, blob: encode(out.audio, out.sampling_rate), dur: out.audio.length / out.sampling_rate });
+  } catch (err) { postMessage({ id, error: err.message || String(err) }); }
+};`;
+let ttsWorker = null, busy = false, jobId = 0;
+const jobs = [], pending = new Map();
+function getWorker() {
+  if (ttsWorker) return ttsWorker;
+  ttsWorker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: "text/javascript" })));
+  ttsWorker.onmessage = e => {
+    const d = e.data;
+    if (d.type === "progress") { $("#kkStatus").textContent = `Downloading voice model (one time)… ${Math.round(d.pct)}%`; return; }
+    if (d.type === "ready") { $("#kkStatus").textContent = "Voice ready ✓ (saved on this phone)"; return; }
+    const j = pending.get(d.id); pending.delete(d.id); busy = false;
+    if (j) d.error ? j.rej(new Error(d.error)) : j.res(d);
+    pump();
+  };
+  ttsWorker.onerror = e => { const err = new Error("Voice engine crashed: " + (e.message || "out of memory?")); pending.forEach(j => j.rej(err)); pending.clear(); jobs.splice(0).forEach(j => j.rej(err)); busy = false; ttsWorker.terminate(); ttsWorker = null; };
+  return ttsWorker;
+}
+function synth(text, prio) {
+  return new Promise((res, rej) => { const j = { id: ++jobId, text, voice: voiceId(), res, rej }; prio ? jobs.unshift(j) : jobs.push(j); pump(); });
+}
+function pump() { if (busy || !jobs.length) return; busy = true; const j = jobs.shift(); pending.set(j.id, j); getWorker().postMessage({ id: j.id, text: j.text, voice: j.voice }); }
+
+/* --- Saved audio (phone storage). Same voice+text → same file, so nothing is ever generated twice --- */
+const CACHE = "bella-audio-v1", CURL = "https://audio.readaloud.local/";
+async function sha(s) { const b = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)); return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, "0")).join(""); }
+async function chunkHash(k) { const c = chunks[k]; if (!c.h || c.hv !== voiceId()) { c.h = await sha(voiceId() + "|" + c.text); c.hv = voiceId(); } return c.h; }
+let cacheP = null; const openCache = () => cacheP || (cacheP = caches.open(CACHE));
+async function saved(k) { try { return await (await openCache()).match(CURL + await chunkHash(k)); } catch { return null; } }
+async function save(k, blob, dur) {
+  try { await (await openCache()).put(CURL + await chunkHash(k), new Response(blob, { headers: { "Content-Type": blob.type || "audio/mpeg", "X-Dur": String(dur || 0) } })); } catch (e) { console.warn("save failed", e); }
+}
+const memCache = new Map();   // small: just current + next few parts
+function getChunk(k, prio = true) {
   const c = chunks[k]; if (!c) return Promise.resolve(null);
-  const key = $("#kkVoice").value + "|" + c.text;
+  const key = voiceId() + "|" + k;
   if (memCache.has(key)) return memCache.get(key);
-  const p = genQueue.then(async () => {
-    const tts = await kkLoad();
-    const out = await tts.generate(c.text, { voice: $("#kkVoice").value, speed: 1 });
-    const blob = out.toBlob ? out.toBlob() : new Blob([out.toWav()], { type: "audio/wav" });
-    return { url: URL.createObjectURL(blob), dur: out.audio.length / out.sampling_rate };
-  });
-  genQueue = p.catch(() => {});
+  const p = (async () => {
+    const hit = await saved(k);
+    if (hit) return { url: URL.createObjectURL(await hit.blob()), dur: +hit.headers.get("X-Dur") || 0 };
+    const r = await synth(c.text, prio);
+    await save(k, r.blob, r.dur);
+    return { url: URL.createObjectURL(r.blob), dur: r.dur };
+  })();
   memCache.set(key, p); p.catch(() => memCache.delete(key));
-  if (memCache.size > 30) { const old = memCache.keys().next().value; memCache.get(old).then(r => r && URL.revokeObjectURL(r.url)).catch(() => {}); memCache.delete(old); }
+  while (memCache.size > 5) { const old = memCache.keys().next().value; memCache.get(old).then(r => r && URL.revokeObjectURL(r.url)).catch(() => {}); memCache.delete(old); }
   return p;
 }
-// No word timings from Kokoro → estimate sentence position by its share of the characters
+
+// No word timings → estimate sentence position by its share of the characters
 const sentFrac = (c, j) => c.offs[j] / Math.max(1, c.text.length);
 async function kkSpeak() {
   const k = flat[idx].k, c = chunks[k], my = ++token;
-  $("#pChap").textContent = kk ? "Preparing voice…" : "Loading voice model…";
+  $("#pChap").textContent = "Preparing voice…";
   let res; try { res = await getChunk(k); } catch (err) { if (my === token) { stop(); alertMsg(err.message); } return; }
   if (my !== token || !playing) return;
   playingChunk = k; chunkDur = res.dur;
   audio.src = res.url; audio.playbackRate = +$("#rate").value;
-  const startT = sentFrac(c, idx - c.start) * chunkDur;
-  audio.onloadedmetadata = () => { if (startT > 0.05) audio.currentTime = startT; };
+  const frac = sentFrac(c, idx - c.start);
+  audio.onloadedmetadata = () => { if (!chunkDur || !isFinite(chunkDur)) chunkDur = audio.duration; if (frac > 0.01) audio.currentTime = frac * chunkDur; };
   try { await audio.play(); } catch { stop(); return alertMsg("Tap ▶︎ to start audio."); }
   render();
   getChunk(k + 1).catch(() => {}); getChunk(k + 2).catch(() => {});   // prepare ahead → no gaps
@@ -522,7 +589,7 @@ audio.ontimeupdate = () => {
 };
 audio.onended = () => {
   if (!playing || playingChunk < 0) return; const c = chunks[playingChunk];
-  if (c && c.end < flat.length) { const nextCh = flat[c.end].ci !== flat[c.end - 1].ci; idx = c.end; render(); nextCh ? setTimeout(speakCurrent, 900) : speakCurrent(); }
+  if (c && c.end < flat.length) { const nextCh = flat[c.end].ci !== flat[c.end - 1].ci; idx = c.end; render(); nextCh ? setTimeout(speakCurrent, 700) : speakCurrent(); }
   else stop();
 };
 function alertMsg(m) { $("#pChap").textContent = m; status(m, true); }
@@ -538,7 +605,7 @@ async function play() {
 function stop() {
   playing = false; token++; audio.pause();
   if ("speechSynthesis" in window) speechSynthesis.cancel();
-  $("#bPlay").textContent = "▶︎"; try { wake && wake.release(); } catch {} wake = null;
+  $("#bPlay").textContent = "▶︎"; if (!dl.on) { try { wake && wake.release(); } catch {} wake = null; }
   if (flat[idx]) $("#pChap").textContent = book.chapters[flat[idx].ci].title.slice(0, 40);
 }
 function jump(i) {
@@ -547,20 +614,74 @@ function jump(i) {
   if (engine() === "kokoro" && playingChunk === flat[idx].k && chunkDur) { const c = chunks[playingChunk]; audio.currentTime = sentFrac(c, idx - c.start) * chunkDur; return; }
   token++; audio.pause(); if ("speechSynthesis" in window) speechSynthesis.cancel(); setTimeout(speakCurrent, 60);
 }
-function updateCost() {}
+
+/* ===== Download book audio (like a downloaded audiobook) ===== */
+const dl = { on: false, done: 0, t0: 0, n0: 0 };
+const fmtTime = s => s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.round(s % 3600 / 60)}m` : `${Math.max(1, Math.round(s / 60))}m`;
+async function updateCost() {
+  if (!book || !chunks.length) { $("#dlBox").classList.add("hidden"); return; }
+  $("#dlBox").classList.remove("hidden");
+  let n = 0; for (let k = 0; k < chunks.length; k++) if (await saved(k)) n++;
+  dl.done = n; dlUI();
+}
+function dlUI(msg) {
+  const tot = chunks.length, pct = tot ? dl.done / tot : 0;
+  $("#dlProg").value = pct;
+  $("#dlBtn").textContent = dl.on ? "⏸ Pause download" : dl.done >= tot ? "✓ Downloaded" : dl.done ? "⬇ Resume download" : "⬇ Download book audio";
+  let eta = "";
+  if (dl.on && dl.done > dl.n0) { const per = (Date.now() - dl.t0) / 1000 / (dl.done - dl.n0); eta = ` · ~${fmtTime(per * (tot - dl.done))} left`; }
+  $("#dlStat").textContent = msg || `${Math.round(pct * 100)}% ready to play offline (${dl.done}/${tot} parts)${eta}`;
+}
+async function dlRun() {
+  dl.on = true; dl.t0 = Date.now(); dl.n0 = dl.done; dlUI("Starting…");
+  try { await navigator.storage.persist(); } catch {}
+  try { wake = wake || await navigator.wakeLock.request("screen"); } catch {}
+  const start = flat[idx] ? flat[idx].k : 0, order = [...Array(chunks.length).keys()].map(i => (i + start) % chunks.length);  // from where you are, then wrap
+  for (const k of order) {
+    if (!dl.on || !book) break;
+    if (await saved(k)) continue;
+    try { const r = await synth(chunks[k].text, false); await save(k, r.blob, r.dur); dl.done++; dlUI(); }
+    catch (err) { dl.on = false; dlUI(); dlUI("Paused: " + err.message); return; }
+  }
+  dl.on = false; await updateCost(); if (!playing) { try { wake && wake.release(); } catch {} wake = null; }
+}
+$("#dlBtn").onclick = () => { if (engine() !== "kokoro") return alertMsg("Switch Voice engine to the free AI voice first."); dl.on ? (dl.on = false, dlUI("Pausing after this part…")) : dlRun(); };
+$("#dlDel").onclick = async () => {
+  if (!confirm("Delete this book's downloaded audio?")) return;
+  dl.on = false; const c = await openCache(); for (let k = 0; k < chunks.length; k++) await c.delete(CURL + await chunkHash(k));
+  dl.done = 0; dlUI();
+};
+/* PC route: export the book's parts list → PC makes MP3s → import them here */
+$("#pcExport").onclick = async () => {
+  if (!book) return;
+  const parts = []; for (let k = 0; k < chunks.length; k++) parts.push({ file: (await chunkHash(k)) + ".mp3", text: chunks[k].text });
+  const blob = new Blob([JSON.stringify({ app: "read-aloud", title: book.title, voice: voiceId(), parts })], { type: "application/json" });
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = book.title.replace(/[^\w\- ]+/g, "").slice(0, 60).trim() + ".readaloud.json"; a.click();
+};
+$("#pcImport").onchange = async e => {
+  const files = [...e.target.files]; e.target.value = ""; if (!files.length || !book) return;
+  const want = new Map(); for (let k = 0; k < chunks.length; k++) want.set(await chunkHash(k), k);
+  const c = await openCache(); let n = 0, skip = 0;
+  for (const f of files) {
+    const h = f.name.replace(/\.mp3$/i, "");
+    if (!want.has(h)) { skip++; continue; }
+    await c.put(CURL + h, new Response(f, { headers: { "Content-Type": "audio/mpeg", "X-Dur": "0" } })); n++;
+    if (n % 25 === 0) dlUI(`Importing… ${n}/${files.length}`);
+  }
+  await updateCost(); dlUI(`Imported ${n} parts` + (skip ? ` (${skip} didn't match this book/voice)` : "") + ` — ${Math.round(dl.done / chunks.length * 100)}% ready.`);
+};
 
 /* ===== Voice settings ===== */
 $("#engine").value = store.get("engine", "kokoro");
 $("#kkVoice").value = store.get("kkVoice", "af_bella");
 function toggleEngine() { const e = engine(); $("#kkBox").classList.toggle("hidden", e !== "kokoro"); $("#devBox").classList.toggle("hidden", e === "kokoro"); }
 $("#engine").onchange = e => { stop(); playingChunk = -1; store.set("engine", e.target.value); toggleEngine(); };
-$("#kkVoice").onchange = e => { stop(); playingChunk = -1; store.set("kkVoice", e.target.value); };
+$("#kkVoice").onchange = e => { stop(); playingChunk = -1; memCache.clear(); store.set("kkVoice", e.target.value); updateCost(); };
 $("#kkTest").onclick = async () => {
   stop(); playingChunk = -1; const b = $("#kkTest"); b.textContent = "⏳ Generating…";
   try {
-    const tts = await kkLoad();
-    const out = await tts.generate("Welcome. I'm the student council president, and I expect you to pay attention. Now then, shall we begin the story?", { voice: $("#kkVoice").value });
-    audio.src = URL.createObjectURL(out.toBlob ? out.toBlob() : new Blob([out.toWav()], { type: "audio/wav" })); audio.playbackRate = 1; await audio.play();
+    const r = await synth("Welcome. I'm the student council president, and I expect you to pay attention. Now then, shall we begin the story?", true);
+    audio.src = URL.createObjectURL(r.blob); audio.playbackRate = 1; await audio.play();
   } catch (err) { alertMsg(err.message); }
   b.textContent = "▶︎ Test voice";
 };
