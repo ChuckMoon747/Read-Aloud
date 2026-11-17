@@ -80,12 +80,12 @@ label.set{display:block;margin:12px 0 4px;font-size:14px;color:var(--mut)}
   <div class="card">
     <div class="mut" style="margin-bottom:8px">Have the book another way?</div>
     <div class="row">
-      <label class="btn" for="fileIn" style="text-align:center">📂 Open EPUB / TXT</label>
+      <label class="btn" for="fileIn" style="text-align:center">📂 Open a book file</label>
       <label class="btn" for="pageIn" style="text-align:center">📄 Scan a page</label>
     </div>
-    <input id="fileIn" type="file" accept=".epub,.txt,application/epub+zip,text/plain" class="hidden">
+    <input id="fileIn" type="file" accept=".epub,.txt,.pdf,.docx,application/epub+zip,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" class="hidden">
     <input id="pageIn" type="file" accept="image/*" capture="environment" class="hidden">
-    <div class="mut" style="margin-top:8px">“Scan a page” reads printed pages from a physical book — scan one after another and they queue up.</div>
+    <div class="mut" style="margin-top:8px">Book files: EPUB, PDF, Word (.docx), TXT. “Scan a page” reads printed pages from a physical book — scan one after another and they queue up.</div>
   </div>
 </section>
 
@@ -354,11 +354,157 @@ async function parseEpub(file) {
   }
   return { id: "ep:" + title, title, author, chapters };
 }
+/* ---------- PDF (pdf.js) ---------- */
+const PDFJS = "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/";
+let pdfjsP = null;
+function loadPdfJs() {
+  return pdfjsP || (pdfjsP = new Promise((res, rej) => {
+    if (window.pdfjsLib) return res(window.pdfjsLib);
+    const s = document.createElement("script"); s.src = PDFJS + "pdf.min.js";
+    s.onload = () => { pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS + "pdf.worker.min.js"; res(pdfjsLib); };
+    s.onerror = () => { pdfjsP = null; rej(new Error("PDF reader couldn't load — check your connection.")); };
+    document.head.appendChild(s);
+  }));
+}
+async function parsePdf(file) {
+  const lib = await loadPdfJs();
+  const pdf = await lib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
+  let info = {}; try { info = (await pdf.getMetadata()).info || {}; } catch {}
+  const title = (info.Title && info.Title.trim().length > 2 && !/^untitled|^\(anonymous\)$|\.pdf$|microsoft word/i.test(info.Title)) ? info.Title.trim() : file.name.replace(/\.pdf$/i, "");
+  const author = /^\(anonymous\)$|^unknown$/i.test((info.Author || "").trim()) ? "" : (info.Author || "").trim();
+  const pages = []; let chars = 0;
+  for (let n = 1; n <= pdf.numPages; n++) {
+    const page = await pdf.getPage(n), tc = await page.getTextContent();
+    const rows = [];
+    for (const it of tc.items) {
+      if (!it.str || !it.str.trim()) continue;
+      const x = it.transform[4], y = it.transform[5], h = Math.abs(it.transform[3]) || it.height || 10;
+      let r = rows.find(r => Math.abs(r.y - y) < h * 0.5);
+      if (!r) { r = { y, h, items: [] }; rows.push(r); }
+      r.items.push({ x, w: it.width, s: it.str });
+    }
+    rows.sort((a, b) => b.y - a.y);
+    const lines = rows.map(r => {
+      r.items.sort((a, b) => a.x - b.x);
+      let t = "", end = null;
+      for (const i of r.items) { if (end !== null && i.x - end > r.h * 0.15 && !t.endsWith(" ") && !i.s.startsWith(" ")) t += " "; t += i.s; end = i.x + i.w; }
+      return { y: r.y, h: r.h, x: r.items[0].x, right: end, t: t.replace(/\s+/g, " ").trim() };
+    }).filter(l => l.t);
+    lines.forEach(l => chars += l.t.length);
+    pages.push(lines); page.cleanup();
+    if (n % 5 === 0) status(`Reading PDF… page ${n} of ${pdf.numPages}`);
+  }
+  if (chars < pdf.numPages * 40) return ocrPdf(pdf, title, author);
+
+  // drop running headers/footers + page numbers (lines repeated at the top/bottom of many pages)
+  const norm = t => t.toLowerCase().replace(/\d+/g, "#").trim(), freq = {};
+  pages.forEach(L => [L[0], L[1], L[L.length - 1], L[L.length - 2]].filter(Boolean).forEach(l => freq[norm(l.t)] = (freq[norm(l.t)] || 0) + 1));
+  const rep = new Set(Object.keys(freq).filter(k => freq[k] >= Math.max(3, pages.length * 0.3)));
+  const isJunk = (l, i, L) => /^[\divxlc\s\-–—|.]+$/i.test(l.t) || ((i < 2 || i >= L.length - 2) && l.t.length < 70 && !/^(chapter|part|book|prologue|epilogue|section)\b/i.test(l.t) && rep.has(norm(l.t)));
+
+  // rebuild paragraphs: break on bigger vertical gaps, indents, or short lines ending a sentence
+  const paras = [], pageOf = []; let lastFull = false;
+  pages.forEach((L0, pi) => {
+    const L = L0.filter((l, i) => !isJunk(l, i, L0)); if (!L.length) return;
+    const gaps = []; for (let i = 1; i < L.length; i++) gaps.push(L[i - 1].y - L[i].y);
+    const med = gaps.length ? gaps.slice().sort((a, b) => a - b)[gaps.length >> 1] : 12;
+    const left = Math.min(...L.map(l => l.x)), right = Math.max(...L.map(l => l.right));
+    const hs = L.map(l => l.h).sort((a, b) => a - b), medH = hs[hs.length >> 1];
+    let cur = null;
+    L.forEach((l, i) => {
+      const prev = L[i - 1];
+      const brk = !cur || (prev.y - l.y) > med * 1.4 || (l.x - left > l.h * 0.8 && l.x - left < (right - left) * 0.3)
+        || (/[.!?:"”’]$/.test(prev.t) && prev.right < left + (right - left) * 0.8) || l.h > prev.h * 1.25 || prev.h > l.h * 1.25;
+      if (brk) {
+        // continue a paragraph that ran over from the previous page
+        const runOn = paras.length && (!/[.!?"”’:]$/.test(paras[paras.length - 1]) || (lastFull && l.x - left < l.h * 0.8));
+        if (!cur && i === 0 && runOn && l.h < medH * 1.15 && !/^(chapter|part|book|prologue|epilogue|section)\b/i.test(l.t) && /^[a-z0-9"“‘(A-Z]/.test(l.t)) { cur = { i: paras.length - 1 }; const q = paras[cur.i]; paras[cur.i] = /[A-Za-z]-$/.test(q) && /^[a-z]/.test(l.t) ? q.slice(0, -1) + l.t : q + " " + l.t; return; }
+        paras.push(l.t); pageOf.push(pi); cur = { i: paras.length - 1 };
+      } else {
+        const p = paras[cur.i];
+        paras[cur.i] = /[A-Za-z]-$/.test(p) && /^[a-z]/.test(l.t) ? p.slice(0, -1) + l.t : p + " " + l.t;
+      }
+    });
+    const last = L[L.length - 1]; lastFull = last.right > left + (right - left) * 0.85 && !(last.h > med * 1.5);
+  });
+
+  // chapters from the PDF's bookmarks if it has them, otherwise detect "Chapter 1" style headings
+  let chapters = null;
+  try {
+    const ol = await pdf.getOutline();
+    if (ol && ol.length >= 2) {
+      const marks = [];
+      for (const o of ol) {
+        let d = o.dest; if (typeof d === "string") d = await pdf.getDestination(d);
+        if (d && d[0]) marks.push({ title: o.title.trim(), page: await pdf.getPageIndex(d[0]) });
+      }
+      marks.sort((a, b) => a.page - b.page);
+      if (marks.length >= 2) {
+        chapters = [];
+        const first = pageOf.findIndex(p => p >= marks[0].page);
+        if (first > 0) chapters.push(makeChapter("Opening", paras.slice(0, first)));
+        marks.forEach((m, j) => {
+          const a = pageOf.findIndex(p => p >= m.page), b = j + 1 < marks.length ? pageOf.findIndex(p => p >= marks[j + 1].page) : paras.length;
+          if (a >= 0) { const ps = paras.slice(a, b < 0 ? paras.length : b); if (ps.length && ps[0].trim().toLowerCase() === m.title.toLowerCase()) ps.shift(); if (ps.length) chapters.push(makeChapter(m.title, ps)); }
+        });
+      }
+    }
+  } catch {}
+  if (!chapters || !chapters.length) chapters = splitPlain(paras.join("\n\n"));
+  return { id: "pdf:" + title + ":" + pdf.numPages, title, author, chapters };
+}
+// Scanned PDF (pictures of pages, no text) → read each page with OCR
+async function ocrPdf(pdf, title, author) {
+  if (!confirm(`This PDF is scanned images (${pdf.numPages} pages). Read it with the camera text reader? It takes a few seconds per page.`)) throw new Error("Cancelled.");
+  const chapters = [];
+  for (let n = 1; n <= pdf.numPages; n++) {
+    const page = await pdf.getPage(n), vp = page.getViewport({ scale: 2 });
+    const c = document.createElement("canvas"); c.width = vp.width; c.height = vp.height;
+    await page.render({ canvasContext: c.getContext("2d"), viewport: vp }).promise;
+    const data = await ocr(c, p => status(`Reading scanned page ${n} of ${pdf.numPages}… ${Math.round(p * 100)}%`));
+    const paras = (data.paragraphs || []).map(p => p.text.replace(/-\n/g, "").replace(/\n/g, " ")).filter(p => p.trim().length > 2);
+    if (paras.length) chapters.push(makeChapter("Page " + n, paras));
+    page.cleanup();
+  }
+  return { id: "pdfocr:" + title, title, author, chapters };
+}
+
+/* ---------- Word (.docx) ---------- */
+async function parseDocx(file) {
+  if (!window.JSZip) throw new Error("Word reader still loading — try again.");
+  const zip = await JSZip.loadAsync(file), dp = new DOMParser();
+  const W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+  const docF = zip.file("word/document.xml"); if (!docF) throw new Error("That doesn't look like a Word document.");
+  const doc = dp.parseFromString(await docF.async("text"), "application/xml");
+  let title = file.name.replace(/\.docx$/i, ""), author = "";
+  try { const core = dp.parseFromString(await zip.file("docProps/core.xml").async("text"), "application/xml");
+    const t = core.getElementsByTagName("dc:title")[0], a = core.getElementsByTagName("dc:creator")[0];
+    if (t && t.textContent.trim()) title = t.textContent.trim(); if (a) author = a.textContent.trim(); } catch {}
+  const items = [];
+  for (const p of doc.getElementsByTagNameNS(W, "p")) {
+    let t = "";
+    for (const n of p.getElementsByTagNameNS(W, "*")) { if (n.localName === "t") t += n.textContent; else if (n.localName === "tab" || n.localName === "br") t += " "; }
+    t = t.replace(/\s+/g, " ").trim(); if (!t) continue;
+    const st = p.getElementsByTagNameNS(W, "pStyle")[0], sv = st ? (st.getAttributeNS(W, "val") || st.getAttribute("w:val") || "") : "";
+    items.push({ t, head: /^(heading ?[12]|title|berschrift ?[12])$/i.test(sv) && t.length < 120 });
+  }
+  let chapters;
+  if (items.filter(i => i.head).length >= 2) {
+    chapters = []; let cur = { title: "Opening", paras: [] };
+    for (const i of items) { if (i.head) { if (cur.paras.length) chapters.push(makeChapter(cur.title, cur.paras)); cur = { title: i.t, paras: [] }; } else cur.paras.push(i.t); }
+    if (cur.paras.length) chapters.push(makeChapter(cur.title, cur.paras));
+  } else chapters = splitPlain(items.map(i => i.t).join("\n\n"));
+  return { id: "docx:" + title, title, author, chapters };
+}
+
 $("#fileIn").onchange = async e => {
   const f = e.target.files[0]; e.target.value = ""; if (!f) return;
   status("Opening " + f.name + "…");
   try {
     if (/\.epub$/i.test(f.name)) loadBook(await parseEpub(f));
+    else if (/\.pdf$/i.test(f.name) || f.type === "application/pdf") loadBook(await parsePdf(f));
+    else if (/\.docx$/i.test(f.name)) loadBook(await parseDocx(f));
+    else if (/\.(doc|mobi|azw3?|kfx|pages)$/i.test(f.name)) throw new Error("That format isn't supported. Use EPUB, PDF, Word (.docx) or TXT. For old .doc files, re-save as .docx.");
     else { const t = await f.text(); loadBook({ id: "tx:" + f.name, title: f.name.replace(/\.\w+$/, ""), author: "", chapters: /PROJECT GUTENBERG/i.test(t) ? parseGutenberg(t) : splitPlain(t) }); }
   } catch (err) { status(err.message, true); }
 };
